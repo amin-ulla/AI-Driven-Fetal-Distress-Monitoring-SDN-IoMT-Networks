@@ -38,7 +38,7 @@ Password: rocks
 1. Start ONOS and ensure the REST API is reachable.
 2. Run the script:
    ```bash
-   python anomaly_detection_onos.py
+   python main.py
    ```
 3. The model will:
    - Collect flow stats
