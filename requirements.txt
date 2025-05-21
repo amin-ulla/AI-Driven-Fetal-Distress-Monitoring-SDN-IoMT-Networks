@@ -5,6 +5,9 @@ requests>=2.25.1
 matplotlib>=3.4.3   # For visualization
 pandas>=1.3.0       # For data handling or exporting logs
 loguru>=0.5.3       # Optional: enhanced logging
+requests>=2.25.1
+schedule>=1.1.0
+scikit-learn>=0.24.0
 
 # ONOS controller requirements
 # Ensure ONOS is installed and running on a reachable host.
