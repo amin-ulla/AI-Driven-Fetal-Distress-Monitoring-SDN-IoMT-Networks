@@ -46,20 +46,12 @@ Password: rocks
    - Detect anomalies
    - Output suspicious flows if detected
 
-# Output
-
-The script prints alerts such as:
-
-```
-⚠Anomalous Flows Detected at indices: [2 5 9]
-Scores: [0.321, 0.412, 0.298]
-```
 
 ## Files
 
-- `anomaly_detection_onos.py`: Main detection script.
+- `main.py`: Main detection script.
 - `requirements.txt`: Python package requirements.
-- `ctg_maternal_dataset.xlsx`: (If integrated with CTG dataset tasks).
+- `Dataset.xlsx`: (If integrated with CTG dataset tasks).
 
 ##  Tips
 
