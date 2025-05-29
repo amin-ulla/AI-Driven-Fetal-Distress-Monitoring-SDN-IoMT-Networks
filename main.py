@@ -1,35 +1,42 @@
-# GAN-AE Framework for CTG Anomaly Detection in SDN-IoMT (ONOS-Integrated)
-
-import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, models, optimizers
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix
+import numpy as np
 import pandas as pd
 import requests
 
-# === ONOS API Configuration ===
-ONOS_API = "http://<ONOS_IP>:8181/onos/v1/flows"  # Replace <ONOS_IP> with actual IP
+latent_dim = 128
+ONOS_IP = "127.0.0.1"
+ONOS_API = f"http://{ONOS_IP}:8181/onos/v1/flows"
 AUTH = ('onos', 'rocks')
-LATENT_DIM = 50
+DATASET_PATH = "Dataset.xlsx"
 
-# 1. Load and preprocess the dataset
+def build_generator(output_dim):
+    return tf.keras.Sequential([
+        layers.Dense(256, activation="relu", input_shape=(latent_dim,)),
+        layers.Dense(512, activation="relu"),
+        layers.Dense(1024, activation="relu"),
+        layers.Dense(output_dim, activation="tanh")
+    ])
+
+def build_discriminator(input_dim):
+    return tf.keras.Sequential([
+        layers.Dense(1024, activation="relu", input_shape=(input_dim,)),
+        layers.Dense(512, activation="relu"),
+        layers.Dense(256, activation="relu"),
+        layers.Dense(1, activation="sigmoid")
+    ])
 
 def load_dataset(path):
     df = pd.read_excel(path)
-    X = df.drop(columns=['label'])
-    y = df['label'].map({"Normal": 0, "Suspicious": 1, "Pathological": 2})
-    return X.values, y.values
+    df = df.drop(columns=["label"], errors="ignore")
+    return df.values.astype(np.float32)
 
-def normalize(X):
-    return (X - X.min(axis=0)) / (X.max(axis=0) + 1e-6)
+def normalize(data, ref_min=None, ref_max=None):
+    if ref_min is None or ref_max is None:
+        ref_min, ref_max = data.min(axis=0), data.max(axis=0)
+    return (data - ref_min) / (ref_max + 1e-6), ref_min, ref_max
 
-def normalize_live_data(X_live, X_train):
-    return (X_live - X_train.min(axis=0)) / (X_train.max(axis=0) + 1e-6)
-
-# 2. ONOS Flow Fetching
-
-def get_network_data_from_onos():
+def get_network_data():
     try:
         response = requests.get(ONOS_API, auth=AUTH)
         response.raise_for_status()
@@ -42,130 +49,69 @@ def get_network_data_from_onos():
             features.append([pkt_count, byte_count, duration])
         return np.array(features, dtype=np.float32)
     except Exception as e:
-        print(f"Error fetching ONOS data: {e}")
+        print(f"Failed to fetch ONOS data: {e}")
         return None
 
-# 3. GAN Models
-
-def build_generator(output_dim):
-    return models.Sequential([
-        layers.Input(shape=(LATENT_DIM,)),
-        layers.Dense(80, activation='relu'),
-        layers.Dense(output_dim, activation='tanh')
-    ])
-
-def build_discriminator(input_dim):
-    return models.Sequential([
-        layers.Input(shape=(input_dim,)),
-        layers.Dense(80, activation='relu'),
-        layers.Dense(1, activation='sigmoid')
-    ])
-
-# 4. Autoencoder
-
-def build_autoencoder(input_dim):
-    encoder = models.Sequential([
-        layers.Input(shape=(input_dim,)),
-        layers.Dense(64, activation='relu'),
-        layers.Dense(32, activation='relu')
-    ])
-    decoder = models.Sequential([
-        layers.Input(shape=(32,)),
-        layers.Dense(64, activation='relu'),
-        layers.Dense(input_dim, activation='sigmoid')
-    ])
-    autoencoder = models.Sequential([encoder, decoder])
-    return autoencoder, encoder
-
-# 5. Classifier
-
-def build_classifier(input_dim):
-    model = models.Sequential([
-        layers.Input(shape=(input_dim,)),
-        layers.Dense(32, activation='relu'),
-        layers.Dense(16, activation='relu'),
-        layers.Dense(3, activation='softmax')
-    ])
-    return model
-
-# 6. Training Functions
-
-def train_gan(generator, discriminator, real_data, epochs=1000, batch_size=64):
-    g_opt = optimizers.Adam(0.0002)
-    d_opt = optimizers.Adam(0.0002)
-    bce = tf.keras.losses.BinaryCrossentropy()
+def train_began(generator, discriminator, data, epochs=1000, batch_size=64, lr=0.0002):
+    g_optimizer = optimizers.Adam(lr)
+    d_optimizer = optimizers.Adam(lr)
+    loss_fn = tf.keras.losses.BinaryCrossentropy()
 
     for epoch in range(epochs):
-        idx = np.random.randint(0, real_data.shape[0], batch_size)
-        real_batch = real_data[idx]
-        z = np.random.normal(0, 1, (batch_size, LATENT_DIM))
-        fake_batch = generator(z)
+        idx = np.random.randint(0, data.shape[0], batch_size)
+        real_samples = data[idx]
+        z = np.random.normal(0, 1, (batch_size, latent_dim))
+        fake_samples = generator(z, training=True)
 
         with tf.GradientTape() as tape_d:
-            real_out = discriminator(real_batch)
-            fake_out = discriminator(fake_batch)
-            d_loss = bce(tf.ones_like(real_out), real_out) + bce(tf.zeros_like(fake_out), fake_out)
+            real_preds = discriminator(real_samples, training=True)
+            fake_preds = discriminator(fake_samples, training=True)
+            d_loss = loss_fn(tf.ones_like(real_preds), real_preds) + \
+                     loss_fn(tf.zeros_like(fake_preds), fake_preds)
         grads_d = tape_d.gradient(d_loss, discriminator.trainable_variables)
-        d_opt.apply_gradients(zip(grads_d, discriminator.trainable_variables))
+        d_optimizer.apply_gradients(zip(grads_d, discriminator.trainable_variables))
 
         with tf.GradientTape() as tape_g:
-            fake_batch = generator(z)
-            fake_out = discriminator(fake_batch)
-            g_loss = bce(tf.ones_like(fake_out), fake_out)
+            generated = generator(z, training=True)
+            fake_preds = discriminator(generated, training=True)
+            g_loss = loss_fn(tf.ones_like(fake_preds), fake_preds)
         grads_g = tape_g.gradient(g_loss, generator.trainable_variables)
-        g_opt.apply_gradients(zip(grads_g, generator.trainable_variables))
+        g_optimizer.apply_gradients(zip(grads_g, generator.trainable_variables))
 
         if epoch % 100 == 0:
-            print(f"Epoch {epoch}: D Loss = {d_loss.numpy():.4f}, G Loss = {g_loss.numpy():.4f}")
+            print(f"Epoch {epoch}/{epochs} - D Loss: {d_loss.numpy():.4f} - G Loss: {g_loss.numpy():.4f}")
 
-def train_autoencoder(autoencoder, data, epochs=300):
-    autoencoder.compile(optimizer='adam', loss='mse')
-    autoencoder.fit(data, data, epochs=epochs, batch_size=64, verbose=0)
-
-# 7. Anomaly Detection on ONOS
-
-def detect_anomalies_on_onos(classifier, encoder, X_train):
-    X_live = get_network_data_from_onos()
-    if X_live is not None and len(X_live) > 0:
-        X_live_norm = normalize_live_data(X_live, X_train)
-        X_encoded = encoder.predict(X_live_norm)
-        preds = classifier.predict(X_encoded)
-        anomalies = np.where(np.argmax(preds, axis=1) != 0)[0]
-        if len(anomalies) > 0:
-            print(f"Anomalies detected in ONOS flows at indices: {anomalies}")
-        else:
-            print("No anomalies detected in ONOS flows.")
-
-# 8. Main Execution
+def detect_anomalies(discriminator, data, threshold=0.5):
+    scores = discriminator(data).numpy().flatten()
+    anomalies = np.where(scores < threshold)[0]
+    if len(anomalies) > 0:
+        print(f"Anomalous Flows Detected: {anomalies.tolist()}")
+    else:
+        print("No Anomalous Flows Detected.")
 
 def main():
-    X, y = load_dataset("Dataset.xlsx")
-    X = normalize(X)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, stratify=y)
+    dataset = load_dataset(DATASET_PATH)
+    if dataset is None or len(dataset) < 10:
+        print("Not enough dataset samples.")
+        return
 
-    gan_generator = build_generator(X.shape[1])
-    gan_discriminator = build_discriminator(X.shape[1])
-    train_gan(gan_generator, gan_discriminator, X_train)
+    norm_dataset, ref_min, ref_max = normalize(dataset)
 
-    z = np.random.normal(0, 1, (10000, LATENT_DIM))
-    synthetic_data = gan_generator.predict(z)
-    X_aug = np.vstack([X_train, synthetic_data])
-    y_aug = np.hstack([y_train, np.random.choice([1, 2], 10000)])
+    generator = build_generator(norm_dataset.shape[1])
+    discriminator = build_discriminator(norm_dataset.shape[1])
 
-    ae, encoder = build_autoencoder(X.shape[1])
-    train_autoencoder(ae, X_aug)
-    X_encoded = encoder.predict(X_aug)
+    print("Training GAN on CTG dataset...")
+    train_began(generator, discriminator, norm_dataset)
 
-    classifier = build_classifier(X_encoded.shape[1])
-    classifier.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-    classifier.fit(X_encoded, y_aug, epochs=50, batch_size=64)
+    print("Fetching ONOS flow data for inference...")
+    network_data = get_network_data()
+    if network_data is None or len(network_data) < 3:
+        print("Not enough ONOS flow data.")
+        return
 
-    X_test_encoded = encoder.predict(X_test)
-    y_pred = np.argmax(classifier.predict(X_test_encoded), axis=1)
-    print(classification_report(y_test, y_pred))
-
-    # ONOS Integration: Run anomaly detection on live SDN data
-    detect_anomalies_on_onos(classifier, encoder, X_train)
+    norm_net_data, _, _ = normalize(network_data, ref_min, ref_max)
+    print("Detecting anomalies in ONOS flow data...")
+    detect_anomalies(discriminator, norm_net_data)
 
 if __name__ == "__main__":
     main()
